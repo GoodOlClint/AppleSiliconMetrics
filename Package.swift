@@ -14,10 +14,19 @@ let package = Package(
         .executable(name: "asmetrics", targets: ["asmetrics"]),
     ],
     targets: [
-        // Pure-Swift public API. The implementing session adds a `CIOReport`
-        // systemLibrary target (module map + header declaring the IOReport
-        // symbols) and lists it as a dependency here — see PROMPT.md §Linking.
-        .target(name: "AppleSiliconMetrics"),
+        // System-library shim re-declaring the private IOReport C symbols.
+        // The framework lives only in the dyld shared cache (no .framework on
+        // disk, no SDK stub), so we link the `IOReport` dylib by name on the
+        // consuming target below; the linker resolves it from the cache.
+        .systemLibrary(name: "CIOReport"),
+        .target(
+            name: "AppleSiliconMetrics",
+            dependencies: ["CIOReport"],
+            linkerSettings: [
+                .linkedLibrary("IOReport"),
+                .linkedFramework("IOKit"),
+                .linkedFramework("CoreFoundation"),
+            ]),
         .executableTarget(
             name: "asmetrics", dependencies: ["AppleSiliconMetrics"]),
         .testTarget(

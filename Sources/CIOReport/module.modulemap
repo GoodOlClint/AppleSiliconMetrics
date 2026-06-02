@@ -1,0 +1,8 @@
+// System-library shim for Apple's private `IOReport` framework. The framework
+// has no public header and ships only inside the dyld shared cache; this module
+// re-declares the handful of C symbols we call. Linking is configured on the
+// `AppleSiliconMetrics` target (see Package.swift).
+module CIOReport [system] {
+    header "CIOReport.h"
+    export *
+}

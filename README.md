@@ -5,8 +5,10 @@ Sudoless Apple Silicon SoC telemetry for Swift — GPU/CPU/ANE **frequency**,
 framework (the same source `powermetrics` uses), with no root and no
 subprocess. Per-component **temperature** is a later, opt-in addition.
 
-> **Status: scaffold.** The public API is in place; the IOReport implementation
-> is the next step — see [`PROMPT.md`](PROMPT.md) for the full brief.
+> **Status: working (v0.1.0).** GPU effective frequency + active residency are
+> implemented sudoless via IOReport and validated against `powermetrics` on
+> Apple Silicon (exact match idle and loaded on M5 Max). CPU/ANE/package power
+> and temperature are still to come — see [`PROMPT.md`](PROMPT.md).
 
 ## Why this exists
 
@@ -31,7 +33,24 @@ Or the bundled CLI, for validation against `powermetrics`:
 
 ```sh
 swift run asmetrics --watch
+# compare in another terminal:
+sudo powermetrics --samplers gpu_power | grep "GPU HW active frequency"
 ```
+
+Set `ASMETRICS_DEBUG=1` to dump the discovered IOReport channels and the loaded
+DVFS frequency table to stderr — handy when porting to a new SoC or OS.
+
+### Running the tests
+
+The test suite uses `swift-testing`, which ships with the full Xcode toolchain
+(not Command Line Tools). If `swift test` reports `no such module 'Testing'`,
+point it at Xcode for that command:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
+```
+
+The library and `asmetrics` CLI build fine under Command Line Tools alone.
 
 ## Scope
 
