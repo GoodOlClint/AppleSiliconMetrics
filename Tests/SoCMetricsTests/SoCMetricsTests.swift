@@ -1,6 +1,6 @@
 import Testing
 
-@testable import AppleSiliconMetrics
+@testable import SoCMetrics
 
 /// Whether we're running on Apple Silicon, where IOReport + the GPU
 /// performance-state channels are expected to be present.

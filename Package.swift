@@ -1,16 +1,16 @@
 // swift-tools-version: 6.0
 import PackageDescription
 
-// AppleSiliconMetrics — sudoless Apple Silicon SoC telemetry (GPU/CPU/ANE
-// frequency, residency, power) via the private IOReport framework, plus
-// (later) per-component temperature. MIT-licensed; intended to fill the gap
+// SoCMetrics (swift-soc-metrics) — sudoless SoC telemetry for Apple Silicon
+// (GPU/CPU/ANE frequency, residency, power, and die temperature) via the
+// private IOReport framework + AppleSMC. MIT-licensed; intended to fill the gap
 // where no maintained Swift package exists (the good implementations are all
 // Rust/Go/Python). See PROMPT.md for the implementation brief.
 let package = Package(
-    name: "AppleSiliconMetrics",
+    name: "swift-soc-metrics",
     platforms: [.macOS(.v13)],
     products: [
-        .library(name: "AppleSiliconMetrics", targets: ["AppleSiliconMetrics"]),
+        .library(name: "SoCMetrics", targets: ["SoCMetrics"]),
         .executable(name: "asmetrics", targets: ["asmetrics"]),
     ],
     targets: [
@@ -20,7 +20,7 @@ let package = Package(
         // consuming target below; the linker resolves it from the cache.
         .systemLibrary(name: "CIOReport"),
         .target(
-            name: "AppleSiliconMetrics",
+            name: "SoCMetrics",
             dependencies: ["CIOReport"],
             linkerSettings: [
                 .linkedLibrary("IOReport"),
@@ -28,9 +28,9 @@ let package = Package(
                 .linkedFramework("CoreFoundation"),
             ]),
         .executableTarget(
-            name: "asmetrics", dependencies: ["AppleSiliconMetrics"]),
+            name: "asmetrics", dependencies: ["SoCMetrics"]),
         .testTarget(
-            name: "AppleSiliconMetricsTests",
-            dependencies: ["AppleSiliconMetrics"]),
+            name: "SoCMetricsTests",
+            dependencies: ["SoCMetrics"]),
     ]
 )

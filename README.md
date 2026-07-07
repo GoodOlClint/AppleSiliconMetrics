@@ -1,13 +1,14 @@
-# AppleSiliconMetrics
+# SoCMetrics
 
-[![CI](https://github.com/GoodOlClint/AppleSiliconMetrics/actions/workflows/ci.yml/badge.svg)](https://github.com/GoodOlClint/AppleSiliconMetrics/actions/workflows/ci.yml)
+[![CI](https://github.com/GoodOlClint/swift-soc-metrics/actions/workflows/ci.yml/badge.svg)](https://github.com/GoodOlClint/swift-soc-metrics/actions/workflows/ci.yml)
 
-Sudoless Apple Silicon SoC telemetry for Swift — GPU/CPU/ANE **frequency**,
-**active residency**, **power**, and per-component **die temperature**, read
-directly from the private `IOReport` framework (the same source `powermetrics`
-uses) and the `AppleSMC` sensors, with no root and no subprocess.
+Sudoless SoC telemetry **for Apple Silicon**, in Swift — GPU/CPU/ANE
+**frequency**, **active residency**, **power**, and per-component **die
+temperature**, read directly from the private `IOReport` framework (the same
+source `powermetrics` uses) and the `AppleSMC` sensors, with no root and no
+subprocess.
 
-> **Status: working (v0.3).** GPU effective frequency + active residency,
+> **Status: working (v0.4).** GPU effective frequency + active residency,
 > per-CPU-cluster frequencies, ANE + whole-package power (all via IOReport), and
 > GPU/CPU **die temperature** (via SMC) are implemented sudoless and validated on
 > Apple Silicon idle and loaded — GPU frequency exact, package power within ~1%,
@@ -28,16 +29,18 @@ the `IOReport` approach into a small, MIT-licensed, reusable SwiftPM library.
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/GoodOlClint/AppleSiliconMetrics.git", from: "0.3.0")
+    .package(url: "https://github.com/GoodOlClint/swift-soc-metrics.git", from: "0.4.0")
 ]
 ```
+
+Then add the `SoCMetrics` product to your target's dependencies.
 
 Requires macOS 13+ and Apple Silicon (constructs but degrades to `nil` elsewhere).
 
 ## Usage (target API)
 
 ```swift
-import AppleSiliconMetrics
+import SoCMetrics
 
 let sampler = try SoCSampler()
 let s = sampler.sample(interval: 0.2)
@@ -93,6 +96,12 @@ call sequence.
 13+ and is written to degrade to `nil` on other OS versions and chips, but the
 channel names, DVFS-table encodings, and SMC sensor keys have not been verified
 against any other macOS release — treat earlier/later versions as unvalidated.
+
+## Trademarks
+
+Not affiliated with, authorized by, or endorsed by Apple Inc. "Apple" and
+"Apple Silicon" are trademarks of Apple Inc., used here only descriptively to
+identify the hardware this library reads.
 
 ## License
 

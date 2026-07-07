@@ -1,6 +1,6 @@
-# AppleSiliconMetrics — implementation brief & roadmap
+# SoCMetrics — implementation brief & roadmap
 
-**AppleSiliconMetrics** is a small MIT-licensed SwiftPM library that reads Apple Silicon SoC telemetry **sudoless** via the private `IOReport` framework (the same source `powermetrics` uses) — no root, no subprocess. Every metric is optional and returns `nil` (never crash/abort) when a channel or symbol is missing; these are private interfaces and must degrade cleanly. `sample(interval:)` never throws or traps.
+**SoCMetrics** (`swift-soc-metrics`) is a small MIT-licensed SwiftPM library that reads Apple Silicon SoC telemetry **sudoless** via the private `IOReport` framework (the same source `powermetrics` uses) — no root, no subprocess. Every metric is optional and returns `nil` (never crash/abort) when a channel or symbol is missing; these are private interfaces and must degrade cleanly. `sample(interval:)` never throws or traps.
 
 The public surface stays tiny: one `SoCSampler` and one `SoCSample` value type. References ported from are MIT only — [macmon](https://github.com/vladkens/macmon) (Rust, primary), [mactop](https://github.com/metaspartan/mactop) (Go), [agtop](https://github.com/binlecode/agtop) (Python). No GPL sources (not `exelban/Stats`).
 
@@ -46,10 +46,6 @@ The GPU table is straightforward: `voltage-states9`, field-0 is frequency in **H
 - **Which `voltage-statesN` is which cluster is chip-specific:** M1–M4 use the fixed layout ECPU=`voltage-states1`, PCPU=`voltage-states5`. **M5+ renumbers** and enumerates clusters in the `acc-clusters` IORegistry blob (8-byte records; byte 0 = the cluster's voltage-states index). We read `acc-clusters` first and fall back to `[1, 5]` when it's absent.
 - Clusters are matched to their table at sample time by **active-state count** (total residency states minus leading idle states == table length). A cluster with zero active residency reports its floor DVFS clock (where `powermetrics` prints 0).
 
-## Downstream consumer
-
-Athena (`~/Source/Athena`) adds this as a SwiftPM dependency for **M60.3** (`~/Source/Athena/docs/m60-plan.md`) and surfaces `gpuClockMHz` on `/healthz`. Keep the public API tiny and the failure mode graceful so a server can depend on it safely.
-
 ## Validation recipe
 
 ```sh
@@ -66,7 +62,7 @@ Load with a Metal compute burn (see the v0.2 session's `gpuburn.swift`) plus a f
 Temperature is read from the **SMC**, not IOReport — a deliberate deviation from this brief's original "IOReport first" plan. Probing both hosts showed IOReport temperature does not work: M5 Max exposes **no** IOReport GPU-temperature channels at all (only ANE temp under `ANS2`), and M4 Max's `GPU Stats`/`Temperature`/`Tg*a` channels read back **0** through the documented `IOReportSimpleGetIntegerValue` accessor. The MIT reference `mactop` also reads temperature from SMC, not IOReport. Full rationale: [ADR 0001](docs/decisions/0001-die-temperature-from-smc-not-ioreport.md).
 
 - [x] **`gpuTemperatureC`** / **`cpuTemperatureC`** (°C, optional, `nil` when sensors absent) — mean of the SMC `flt`-typed sensors by prefix (`Tg` = GPU, `Tp`/`Te` = CPU), matching `mactop`. Sudoless (SMC reads need no root).
-- [x] **`SMCReader`** (`Sources/AppleSiliconMetrics/SMC.swift`) — opens the `AppleSMC` user-client, enumerates its `flt` temperature keys once at init (**pattern-match, no per-chip key table that rots**), re-reads their values each sample. `SMCKeyData_t` + selector added to the existing `CIOReport` header; **Package.swift unchanged** (no new target).
+- [x] **`SMCReader`** (`Sources/SoCMetrics/SMC.swift`) — opens the `AppleSMC` user-client, enumerates its `flt` temperature keys once at init (**pattern-match, no per-chip key table that rots**), re-reads their values each sample. `SMCKeyData_t` + selector added to the existing `CIOReport` header; **Package.swift unchanged** (no new target).
 - [x] `ASMETRICS_DEBUG=1` now also enumerates every IOReport channel (`IOReportCopyAllChannels`) and prints the thermal-looking ones — the aid that surfaced the M4-vs-M5 difference.
 - [x] Sane-range temperature test; v0.1/v0.2 fields not regressed (verified on both hosts).
 - [x] Validated on **M5 Max** (≈44 °C idle → ≈72 °C under a Metal burn, GPU 100 % / 58 W) and **M4 Max Studio** (≈35 °C idle → ≈54 °C, 1578 MHz / 38 W). `powermetrics` reports no absolute die temp on Apple Silicon (only a "Nominal" thermal-*pressure* level), so validation is the `Tg`-spread + load-tracking, which this brief permits.

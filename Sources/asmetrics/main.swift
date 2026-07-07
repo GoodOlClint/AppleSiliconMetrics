@@ -1,5 +1,5 @@
-import AppleSiliconMetrics
 import Foundation
+import SoCMetrics
 
 // Tiny validation CLI. Once the IOReport implementation lands, run:
 //   swift run asmetrics --watch
