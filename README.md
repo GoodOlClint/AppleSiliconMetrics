@@ -17,7 +17,7 @@ subprocess.
 
 ## Why this exists
 
-There is no maintained Swift package for this. The clean implementations are
+There is no maintained Swift package for Apple Silicon telemetry. The clean implementations are
 all in other languages — [macmon](https://github.com/vladkens/macmon) and
 [macpow](https://github.com/k06a/macpow) (Rust), [mactop](https://github.com/metaspartan/mactop)
 (Go), [agtop](https://github.com/binlecode/agtop) (Python). The Swift options
