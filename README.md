@@ -83,6 +83,8 @@ The library and `asmetrics` CLI build fine under Command Line Tools alone.
   so temperature is read from the `AppleSMC` `flt` sensors — discovered by
   prefix (`Tg`/`Tp`/`Te`) rather than a per-SoC key table that rots. See
   [ADR 0001](docs/decisions/0001-die-temperature-from-smc-not-ioreport.md).
+- **v0.4:** no new metrics — renamed the package to `SoCMetrics`
+  (`swift-soc-metrics`); `import SoCMetrics` (was `AppleSiliconMetrics`).
 
 ## Caveats
 
