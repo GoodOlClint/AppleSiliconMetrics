@@ -1,122 +1,70 @@
-# Kickoff prompt — implement AppleSiliconMetrics
+# AppleSiliconMetrics — implementation brief & roadmap
 
-Paste this into a fresh coding session opened at `~/Source/AppleSiliconMetrics`.
+**AppleSiliconMetrics** is a small MIT-licensed SwiftPM library that reads Apple Silicon SoC telemetry **sudoless** via the private `IOReport` framework (the same source `powermetrics` uses) — no root, no subprocess. Every metric is optional and returns `nil` (never crash/abort) when a channel or symbol is missing; these are private interfaces and must degrade cleanly. `sample(interval:)` never throws or traps.
 
----
-
-You are implementing **AppleSiliconMetrics**, a small MIT-licensed SwiftPM
-library that reads Apple Silicon SoC telemetry **sudoless** via the private
-`IOReport` framework. The package is scaffolded and builds (pure-Swift stub);
-your job is to make `SoCSampler.sample(interval:)` actually return real numbers,
-starting with **GPU effective frequency (MHz) + active residency**.
-
-## Goal (v1 — ship this first)
-
-`try SoCSampler()` opens an IOReport subscription; `sample(interval:)` takes two
-snapshots `interval` apart, deltas them, and returns:
-- `gpuFrequencyMHz` — residency-weighted average of the active GPU DVFS
-  performance states over the window (must match `powermetrics`'s
-  "GPU HW active frequency" within a few %).
-- `gpuActiveResidency` — fraction of the window the GPU was non-idle (0…1).
-
-Keep every field optional and return `nil` (never crash/abort) when a channel
-or symbol is missing — these are private interfaces and must degrade cleanly.
+The public surface stays tiny: one `SoCSampler` and one `SoCSample` value type. References ported from are MIT only — [macmon](https://github.com/vladkens/macmon) (Rust, primary), [mactop](https://github.com/metaspartan/mactop) (Go), [agtop](https://github.com/binlecode/agtop) (Python). No GPL sources (not `exelban/Stats`).
 
 ## Mechanism (the IOReport call sequence)
 
-IOReport exposes hardware counters as "channels" grouped by name. The GPU
-performance-state residency lives in a group commonly named **"GPU Stats"**
-with subgroup/channel **"GPU Performance States"** (verify exact strings at
-runtime by iterating — names vary by OS). The flow:
+IOReport exposes hardware counters as "channels" grouped by name. The flow:
 
-1. `IOReportCopyChannelsInGroup("GPU Stats", nil, 0, 0, 0)` → CFDictionary of
-   channels. (You may also need "Energy Model" later for power.)
-2. `IOReportMergeChannels(...)` if combining groups; then
-   `IOReportCreateSubscription(nil, channels, &subbedChannels, 0, nil)`.
-3. Snapshot A: `IOReportCreateSamples(subscription, subbedChannels, nil)`.
-4. Wait `interval`.
-5. Snapshot B: `IOReportCreateSamples(...)`.
-6. Delta: `IOReportCreateSamplesDelta(sampleA, sampleB, nil)`.
-7. `IOReportIterate(delta) { channel in ... }` — for the GPU perf-state
-   channel (a *state*-type channel), read
-   `IOReportStateGetCount(channel)`, and per index
-   `IOReportStateGetNameForIndex(channel, i)` (e.g. "P1".."Pn", "IDLE"/"OFF")
-   and `IOReportStateGetResidency(channel, i)` (a tick count over the window).
-   Effective MHz = Σ(residency_i × freq_i) / Σ(residency_i over *active* states);
-   active residency = Σ(active residency) / Σ(all residency).
+1. `IOReportCopyChannelsInGroup(group, nil, 0, 0, 0)` → CFDictionary of channels; `IOReportMergeChannels` to combine groups (we merge "GPU Stats" + "CPU Stats" + "Energy Model" into one subscription).
+2. `IOReportCreateSubscription(nil, channels, &subbedChannels, 0, nil)`.
+3. Snapshot A: `IOReportCreateSamples`; wait `interval`; snapshot B; `IOReportCreateSamplesDelta(A, B, nil)`.
+4. `IOReportIterate`/walk the delta's `IOReportChannels` array — dispatch by `IOReportChannelGetGroup`/`SubGroup`/`ChannelName`.
+   - **State (residency) channels** (GPU/CPU perf-states): `IOReportStateGetCount`, `…GetNameForIndex` ("IDLE"/"OFF"/"P1"…), `…GetResidency`. Effective MHz = Σ(residencyᵢ · freqᵢ) / Σ(active residency); active residency = Σ(active) / Σ(all).
+   - **Simple (scalar) channels** (Energy Model): `IOReportSimpleGetIntegerValue` — an energy counter delta over the window; ÷ window and convert per the channel's `IOReportChannelGetUnitLabel` (mJ/µJ/nJ vary by chip) → watts.
 
-### The per-state frequency table (voltage-states)
-The residency indices map to clock frequencies you must read separately from
-**IORegistry**: match the GPU accelerator service (try `IOServiceMatching(
-"IOGPU")` / `"AGXAccelerator"` / the `pmgr` entry) and
-`IORegistryEntryCreateCFProperties`, then pull the GPU DVFS table — the relevant
-keys are typically `"voltage-states9"` / `"voltage-states9-sram"` (GPU) or a
-`"GPUPerfStates"`-style array, encoded as packed `(freq, voltage)` `UInt32`
-pairs in a `Data` blob, frequencies in Hz (÷ 1e6 for MHz). The number of states
-should line up with the IOReport residency count. Confirm the mapping at runtime.
+The per-state frequency tables come from **IORegistry** `voltage-states*` blobs (packed little-endian `(freq, voltage)` `UInt32` pairs). See "DVFS tables" below — the encoding is chip-specific and was the main surprise of v0.2.
 
-## Linking the private framework
+## Status
 
-Add a `CIOReport` **systemLibrary** target: a `module.modulemap` + a header
-declaring the IOReport function prototypes (`IOReportCreateSubscription`,
-`IOReportCopyChannelsInGroup`, `IOReportCreateSamples`,
-`IOReportCreateSamplesDelta`, `IOReportMergeChannels`, `IOReportIterate`,
-`IOReportStateGetCount`, `IOReportStateGetNameForIndex`,
-`IOReportStateGetResidency`, `IOReportChannelGetGroup/SubGroup/ChannelName`,
-`IOReportSimpleGetIntegerValue`, and the `IOReportSampleCB` block typedef).
-Then link it from the main target. Two known-good options — pick whichever the
-linker accepts on the target macOS:
-- `linkerSettings: [.linkedLibrary("IOReport")]` (the `libIOReport` dylib), or
-- `unsafeFlags(["-F", "/System/Library/PrivateFrameworks", "-framework", "IOReport"])`.
+### v0.1.0 — GPU frequency + active residency ✅ shipped, tagged
 
-Get exact signatures from the MIT references below (do NOT copy GPL code).
+- [x] `CIOReport` systemLibrary target links and imports (`libIOReport` from the dyld shared cache).
+- [x] `SoCSampler.sample()` returns non-nil `gpuFrequencyMHz` on Apple Silicon.
+- [x] `asmetrics --watch` tracks `powermetrics`'s "GPU HW active frequency" within a few % idle and loaded (exact match on M5 Max and M4 Max).
+- [x] Graceful `nil` (no crash) when IOReport is unavailable.
+- [x] Test asserting a sane GPU MHz range.
+- [x] README "Status" flipped scaffold → working; tag `v0.1.0`.
 
-## References to port from (all MIT — do not use the GPL `exelban/Stats`)
+### v0.2 — CPU cluster freqs + ANE/package power + review fixes ✅ implemented
 
-- **macmon** (Rust): https://github.com/vladkens/macmon — `src/sources.rs` has
-  the cleanest IOReport channel + voltage-states logic. Primary reference.
-- **mactop** (Go): https://github.com/metaspartan/mactop — IOReport cgo bindings.
-- **agtop** (Python): https://github.com/binlecode/agtop — IOReport via ctypes.
-- vladkens's writeup: https://medium.com/@vladkens/how-to-get-macos-power-metrics-with-rust-d42b0ad53967
+- [x] **Review fix (a):** `SoCSampler.sample()` serialized with an `NSLock` (IOReport thread-safety is undocumented; a single subscription must not be sampled concurrently).
+- [x] **Review fix (b):** the residency-weighting helper emits an `ASMETRICS_DEBUG` warning when the active-state count and the DVFS table length disagree (the previously-silent `min()` truncation).
+- [x] **`cpuClusterFrequenciesMHz`** — `[String: Double]?` keyed by cluster channel name (`ECPU`/`PCPU`/`PCPU1` on M4, `MCPU0`/`MCPU1`/`PCPU` on M5). "CPU Stats" group, "CPU Complex Performance States" subgroup; reuses the GPU residency-weighting math.
+- [x] **`anePowerWatts`** + **`packagePowerWatts`** — "Energy Model" scalar channels; package = CPU + GPU + ANE aggregate counters (matches `powermetrics`'s "Combined Power (CPU + GPU + ANE)"), picked by exact channel name so per-core/per-rail sub-counters are never double-summed.
+- [x] Sane-range tests for the new fields; existing GPU tests still pass.
+- [x] Validated vs `sudo powermetrics --samplers cpu_power,gpu_power` on **M4 Max Studio** (macOS 26.5.2): GPU freq exact (1578 = 1578 MHz loaded), package power within ~1% (57–58 W vs 56–58 W loaded), CPU E-cluster exact. **M5 Max** validated separately.
 
-## Validation
+#### DVFS tables — the v0.2 gotcha (documented so v0.3 doesn't relearn it)
 
-Build the CLI and compare on this host (Apple M5 Max):
+The GPU table is straightforward: `voltage-states9`, field-0 is frequency in **Hz** (÷1e6 → MHz), ascending. **CPU cluster tables are different and chip-specific:**
 
-```sh
-swift run asmetrics --watch
-# in another terminal:
-sudo powermetrics --samplers gpu_power | grep "GPU HW active frequency"
-```
-
-`gpu_mhz` should track the powermetrics number within a few percent under both
-idle and a sustained GPU load (run any Metal/inference workload). Add a test
-that asserts `gpuFrequencyMHz != nil` on Apple Silicon and is in a sane range
-(e.g. 100–2000 MHz).
-
-## Later (separate, opt-in — don't block v1 on these)
-
-- **CPU cluster freqs + ANE/package power** — same IOReport machinery, "Energy
-  Model" / "CPU Stats" groups.
-- **Temperature** — the fragile part. Apple changes SMC sensor keys every SoC.
-  M5 specifically exposes GPU temp via new chip-specific keys (`Tg0U`, `Tg0X`,
-  `Tg0d`, …) in **`flt`** (IEEE-float) format, and its IOHID sensors use generic
-  `PMU tdie1..14` names — see https://github.com/aristocratos/btop/issues/1653
-  for the M1/M2/M4/M5 key tables and the `flt` parser. Ship temp behind its own
-  type with a per-SoC key map; return `nil` on unknown chips.
+- The **frequency lives in the `-sram` variant** (`voltage-statesN-sram`), field-0. The non-sram `voltage-statesN` field-0 is a period-like value (descending, paired with ascending voltage) — do **not** use it as frequency.
+- **Unit varies by generation:** M1–M3 store Hz, **M4/M5 store kHz**. We normalize by magnitude (≥1e8 → ÷1e6, ≥1e5 → ÷1e3) instead of a per-chip unit table, so a new SoC doesn't silently break.
+- **Which `voltage-statesN` is which cluster is chip-specific:** M1–M4 use the fixed layout ECPU=`voltage-states1`, PCPU=`voltage-states5`. **M5+ renumbers** and enumerates clusters in the `acc-clusters` IORegistry blob (8-byte records; byte 0 = the cluster's voltage-states index). We read `acc-clusters` first and fall back to `[1, 5]` when it's absent.
+- Clusters are matched to their table at sample time by **active-state count** (total residency states minus leading idle states == table length). A cluster with zero active residency reports its floor DVFS clock (where `powermetrics` prints 0).
 
 ## Downstream consumer
 
-Athena (`~/Source/Athena`) will add this as a SwiftPM dependency for **M60.3**
-(see `~/Source/Athena/docs/m60-plan.md`) and surface `gpuClockMHz` on
-`/healthz`. Keep the public API tiny and the failure mode graceful so a server
-can depend on it safely.
+Athena (`~/Source/Athena`) adds this as a SwiftPM dependency for **M60.3** (`~/Source/Athena/docs/m60-plan.md`) and surfaces `gpuClockMHz` on `/healthz`. Keep the public API tiny and the failure mode graceful so a server can depend on it safely.
 
-## Definition of done (v1)
+## Validation recipe
 
-- [ ] `CIOReport` systemLibrary target links and imports.
-- [ ] `SoCSampler.sample()` returns non-nil `gpuFrequencyMHz` on Apple Silicon.
-- [ ] `asmetrics --watch` tracks `powermetrics` within a few % idle and loaded.
-- [ ] Graceful `nil` (no crash) when IOReport is unavailable.
-- [ ] Test asserting a sane GPU MHz range on this host.
-- [ ] README "Status" flipped from scaffold → working; tag `v0.1.0`.
+```sh
+swift run asmetrics --watch          # gpu_mhz, gpu_active, cpu_mhz[…], ane, pkg
+# compare (needs root):
+sudo powermetrics --samplers cpu_power,gpu_power -i 1000 -n 4 \
+  | grep -iE "HW active frequency|Combined Power|ANE Power"
+```
+
+Load with a Metal compute burn (see the v0.2 session's `gpuburn.swift`) plus a few busy CPU cores. `ASMETRICS_DEBUG=1` dumps every discovered channel (group/subgroup/name/states/unit/scalar), the loaded DVFS tables, and any active-state/table mismatch — the first thing to run when porting to a new SoC/OS.
+
+## Next: v0.3 — temperature (its own kickoff)
+
+Temperature is the fragile part historically (Apple churns SMC sensor keys every SoC). **New in macOS 26: GPU die temperature is exposed as IOReport channels**, which may make the per-SoC SMC key tables unnecessary for the GPU — so try IOReport first, SMC keys only as fallback.
+
+- **Primary — IOReport "GPU Stats" → subgroup "Temperature":** channels `Tg1a … Tg61a` (observed on M4 Max), each a state/scalar with `Latest`/`Sum`/`Min`/`Max`. Read the same way as the other IOReport channels (no root). Reduce the per-sensor `Latest` values to a representative GPU die temp (max, or mean of the hottest cluster). Verify the exact strings at runtime with `ASMETRICS_DEBUG=1` — expect drift across M-series and macOS versions. Likely a matching "CPU Stats"/SoC subgroup exists too; discover it the same way.
+- **Fallback — SMC keys** (only if IOReport temp is absent on a chip): per-SoC key map, `nil` on unknown chips. M5 exposes GPU temp via new chip-specific keys (`Tg0U`, `Tg0X`, `Tg0d`, …) in **`flt`** (IEEE-float) format; its IOHID sensors use generic `PMU tdie1..14` names. Key tables + the `flt` parser: https://github.com/aristocratos/btop/issues/1653 (M1/M2/M4/M5). This is the last resort — it needs a new SMC-reader shim and a per-chip table that rots; prefer IOReport.
+- Ship temp behind its own optional field(s) with graceful `nil`; do not regress the v0.1/v0.2 fields. Validate the GPU die temp against `sudo powermetrics --samplers thermal` and/or the `Tg`-channel spread on M5 Max and M4 Max.

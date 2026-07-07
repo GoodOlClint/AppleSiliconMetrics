@@ -7,11 +7,12 @@ Sudoless Apple Silicon SoC telemetry for Swift — GPU/CPU/ANE **frequency**,
 framework (the same source `powermetrics` uses), with no root and no
 subprocess. Per-component **temperature** is a later, opt-in addition.
 
-> **Status: working (v0.1.0).** GPU effective frequency + active residency are
+> **Status: working (v0.2, unreleased).** GPU effective frequency + active
+> residency, per-CPU-cluster frequencies, and ANE + whole-package power are all
 > implemented sudoless via IOReport and validated against `powermetrics` on
-> Apple Silicon (exact match idle and loaded on M5 Max and M4 Max, macOS 26).
-> CPU/ANE/package power
-> and temperature are still to come — see [`PROMPT.md`](PROMPT.md).
+> Apple Silicon idle and loaded (GPU frequency exact and package power within
+> ~1% on both M5 Max and M4 Max, macOS 26). Per-component temperature is still
+> to come — see [`PROMPT.md`](PROMPT.md).
 
 ## Why this exists
 

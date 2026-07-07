@@ -20,15 +20,40 @@ public struct SoCSample: Sendable, Equatable {
     /// state), `0...1`.
     public var gpuActiveResidency: Double?
 
-    // TODO (PROMPT.md): cpuClusterFrequenciesMHz, anePowerWatts,
-    // packagePowerWatts, per-component temperatures, …
+    /// Effective per-CPU-cluster frequency in MHz over the window, keyed by the
+    /// cluster's IOReport channel name (e.g. `"ECPU"`, `"PCPU"`, or on
+    /// multi-die parts `"ECPU0"`, `"PCPU1"`, …). Residency-weighted over each
+    /// cluster's active DVFS states, matching `powermetrics`'s per-cluster
+    /// "HW active frequency". A cluster with no active residency in the window
+    /// reports its lowest DVFS frequency (its parked clock), where
+    /// `powermetrics` prints 0. `nil` when the CPU perf-state channels or DVFS
+    /// tables could not be read.
+    public var cpuClusterFrequenciesMHz: [String: Double]?
+
+    /// Apple Neural Engine power in watts, averaged over the window (from the
+    /// "Energy Model" ANE energy counter). `nil` when unavailable.
+    public var anePowerWatts: Double?
+
+    /// Whole-package power in watts, averaged over the window — the sum of the
+    /// CPU, GPU, and ANE "Energy Model" energy counters (comparable to
+    /// `powermetrics`'s "Combined Power (CPU + GPU + ANE)"). `nil` when no
+    /// energy channels could be read.
+    public var packagePowerWatts: Double?
+
+    // TODO (PROMPT.md): per-component temperatures — see v0.3 plan.
 
     public init(
         gpuFrequencyMHz: Double? = nil,
-        gpuActiveResidency: Double? = nil
+        gpuActiveResidency: Double? = nil,
+        cpuClusterFrequenciesMHz: [String: Double]? = nil,
+        anePowerWatts: Double? = nil,
+        packagePowerWatts: Double? = nil
     ) {
         self.gpuFrequencyMHz = gpuFrequencyMHz
         self.gpuActiveResidency = gpuActiveResidency
+        self.cpuClusterFrequenciesMHz = cpuClusterFrequenciesMHz
+        self.anePowerWatts = anePowerWatts
+        self.packagePowerWatts = packagePowerWatts
     }
 }
 
@@ -62,18 +87,41 @@ public final class SoCSampler: @unchecked Sendable {
     private let subscription: IOReportSubscriptionRef
     private let subscribedChannels: CFMutableDictionary
 
+    /// Serializes `sample()`. IOReport's thread-safety is undocumented, and a
+    /// single subscription must not be sampled concurrently, so we take two
+    /// snapshots under a lock. ponytail: one global lock — a sampler is a
+    /// cheap, per-consumer object; contention here is not a real workload.
+    private let sampleLock = NSLock()
+
     /// GPU DVFS frequencies in MHz, one per *active* performance state, in
     /// P-state index order (NOT necessarily ascending — M4 Max interleaves,
     /// e.g. …1312, 1242, 1380…). Empty when the table could not be read.
     private let gpuFreqsMHz: [Double]
 
+    /// Per-CPU-cluster DVFS frequency tables in MHz, keyed by the number of
+    /// *active* performance states the cluster's IOReport residency channel
+    /// reports. A cluster is matched to its table at sample time by that count
+    /// (see ``activeStateCount``). ponytail: count-keyed, so two clusters with
+    /// the same active-state count but different tables collide — harmless when
+    /// their frequencies match (identical P-clusters), which is the only case
+    /// this arises on the parts we support; upgrade to acc-cluster-index keying
+    /// if a future SoC pairs same-count clusters with different tables.
+    private let cpuFreqTablesByCount: [Int: [Double]]
+
     public init() throws {
-        // Subscribe to the whole "GPU Stats" group; we filter to the "GPUPH"
-        // performance-state channel at sample time. Passing nil subgroup keeps
-        // us robust to subgroup-name drift across OS versions.
+        // Subscribe to GPU + CPU perf-state residency and the Energy Model
+        // power counters in one subscription. GPU Stats is required (it is the
+        // v1 contract); CPU Stats / Energy Model are best-effort merges — a
+        // missing group just leaves those fields nil. Passing nil subgroup
+        // keeps us robust to subgroup-name drift across OS versions.
         guard let channels = IOReportCopyChannelsInGroup(
             "GPU Stats" as CFString, nil, 0, 0, 0) else {
             throw InitError.ioReportUnavailable
+        }
+        for group in ["CPU Stats", "Energy Model"] {
+            guard let extra = IOReportCopyChannelsInGroup(
+                group as CFString, nil, 0, 0, 0) else { continue }
+            IOReportMergeChannels(channels, extra, nil)
         }
 
         var subbed: Unmanaged<CFMutableDictionary>?
@@ -86,13 +134,16 @@ public final class SoCSampler: @unchecked Sendable {
         self.subscription = subscription
         self.subscribedChannels = subscribedChannels
 
-        // The frequency table is best-effort: residency alone still gives us
+        // Frequency tables are best-effort: residency alone still gives us
         // active-residency, just not an effective-MHz figure.
         self.gpuFreqsMHz = Self.loadGPUFrequencyTableMHz() ?? []
+        self.cpuFreqTablesByCount = Self.loadCPUFrequencyTablesMHz()
 
         if Self.debug {
             FileHandle.standardError.write(Data(
-                "asmetrics: gpu DVFS table (MHz, active states): \(gpuFreqsMHz)\n".utf8))
+                ("asmetrics: gpu DVFS table (MHz): \(gpuFreqsMHz)\n"
+                    + "asmetrics: cpu DVFS tables by active-count (MHz): "
+                    + "\(cpuFreqTablesByCount)\n").utf8))
         }
     }
 
@@ -106,11 +157,15 @@ public final class SoCSampler: @unchecked Sendable {
     /// the interval between them). Returns an all-`nil` ``SoCSample`` rather
     /// than throwing if any step fails.
     public func sample(interval: TimeInterval = 0.1) -> SoCSample {
+        sampleLock.lock()
+        defer { sampleLock.unlock() }
+
+        let window = max(0, interval)
         guard let first = IOReportCreateSamples(
             subscription, subscribedChannels, nil) else {
             return SoCSample()
         }
-        Thread.sleep(forTimeInterval: max(0, interval))
+        Thread.sleep(forTimeInterval: window)
         guard let second = IOReportCreateSamples(
             subscription, subscribedChannels, nil) else {
             return SoCSample()
@@ -124,6 +179,12 @@ public final class SoCSampler: @unchecked Sendable {
             return SoCSample()
         }
 
+        var out = SoCSample()
+        var clusters: [String: Double] = [:]
+        // Energy in joules per component over the window, from the "Energy
+        // Model" scalar counters. Package = CPU + GPU + ANE.
+        var energyJ: [String: Double] = [:]
+
         for case let entry as NSDictionary in entries {
             let channel = unsafeBitCast(entry, to: CFDictionary.self)
 
@@ -132,35 +193,83 @@ public final class SoCSampler: @unchecked Sendable {
 
             if Self.debug {
                 let sub = IOReportChannelGetSubGroup(channel) as String? ?? "-"
+                let unit = IOReportChannelGetUnitLabel(channel) as String? ?? "-"
                 let count = IOReportStateGetCount(channel)
+                let scalar = IOReportSimpleGetIntegerValue(channel, 0)
                 let line = "asmetrics: channel group=\(group ?? "-") "
-                    + "subgroup=\(sub) name=\(name ?? "-") states=\(count)\n"
+                    + "subgroup=\(sub) name=\(name ?? "-") "
+                    + "states=\(count) unit=\(unit) scalar=\(scalar)\n"
                 FileHandle.standardError.write(Data(line.utf8))
             }
 
-            // The GPU performance-state residency channel.
-            guard group == "GPU Stats", name == "GPUPH" else { continue }
-            if let result = residencyWeightedGPU(channel) {
-                return SoCSample(
-                    gpuFrequencyMHz: result.frequencyMHz,
-                    gpuActiveResidency: result.activeResidency)
+            switch group {
+            case "GPU Stats" where name == "GPUPH":
+                if let r = residencyWeighted(channel, freqs: gpuFreqsMHz, label: name ?? "GPU") {
+                    out.gpuFrequencyMHz = r.frequencyMHz
+                    out.gpuActiveResidency = r.activeResidency
+                }
+
+            case "CPU Stats":
+                // Per-cluster residency lives in the "CPU Complex Performance
+                // States" subgroup; channel names contain "CPU" (ECPU/PCPU, or
+                // MCPU0/PCPU on M5). Exclude the "_IDLE" companions and the
+                // "…CPM" power-management channels (they have no DVFS table).
+                let sub = IOReportChannelGetSubGroup(channel) as String?
+                guard sub == "CPU Complex Performance States",
+                    let name, name.contains("CPU"), !name.contains("_IDLE")
+                else { continue }
+                // Match the cluster to its DVFS table by active-state count.
+                let active = activeStateCount(channel)
+                guard let freqs = cpuFreqTablesByCount[active] else { continue }
+                if let r = residencyWeighted(channel, freqs: freqs, label: name),
+                    let mhz = r.frequencyMHz {
+                    clusters[name] = mhz
+                }
+
+            case "Energy Model":
+                guard let name else { continue }
+                let unit = IOReportChannelGetUnitLabel(channel) as String? ?? ""
+                let raw = Double(IOReportSimpleGetIntegerValue(channel, 0))
+                let joules = raw * Self.energyUnitToJoules(unit)
+                energyJ[name, default: 0] += joules
+
+            default:
+                continue
             }
         }
 
-        return SoCSample()
+        if !clusters.isEmpty { out.cpuClusterFrequenciesMHz = clusters }
+
+        if window > 0, !energyJ.isEmpty {
+            // Pick the per-component *aggregate* Energy Model counters by exact
+            // name (first candidate that exists), never summing sub-component
+            // breakdowns like "MCPU0DTL…" or "PACC_…" — those would double
+            // count. Names vary by chip, hence the candidate lists.
+            let cpu = Self.aggregate(energyJ, ["CPU Energy", "CPU"])
+            let gpu = Self.aggregate(energyJ, ["GPU Energy", "GPU"])
+            let ane = Self.aggregate(energyJ, ["ANE Energy", "ANE", "ANE0"])
+
+            if let ane { out.anePowerWatts = ane / window }
+            // Package = CPU + GPU + ANE, matching powermetrics's "Combined
+            // Power (CPU + GPU + ANE)". Sum whichever components were found.
+            let parts = [cpu, gpu, ane].compactMap { $0 }
+            if !parts.isEmpty { out.packagePowerWatts = parts.reduce(0, +) / window }
+        }
+
+        return out
     }
 
-    // MARK: - GPU residency math
+    // MARK: - Residency math (shared by GPU and CPU clusters)
 
     /// Compute the residency-weighted effective frequency (MHz) and the
-    /// active-residency fraction from a GPU performance-state channel.
+    /// active-residency fraction from a performance-state channel.
     ///
     /// The state table is `[<inactive states…>, P1, P2, …, Pn]`. The active
-    /// states align 1:1 with ``gpuFreqsMHz`` once the leading inactive states
-    /// are skipped. Effective MHz = Σ(residencyᵢ · freqᵢ) / Σ(active residency);
+    /// states align 1:1 with `freqs` once the leading inactive states are
+    /// skipped. Effective MHz = Σ(residencyᵢ · freqᵢ) / Σ(active residency);
     /// active residency = Σ(active residency) / Σ(all residency).
-    private func residencyWeightedGPU(
-        _ channel: CFDictionary
+    private func residencyWeighted(
+        _ channel: CFDictionary, freqs: [Double], label: String
     ) -> (frequencyMHz: Double?, activeResidency: Double?)? {
         let count = Int(IOReportStateGetCount(channel))
         guard count > 0 else { return nil }
@@ -179,7 +288,15 @@ public final class SoCSampler: @unchecked Sendable {
             !Self.inactiveStateNames.contains($0)
         }) else {
             // Entirely idle window with no recognised active states.
-            return (gpuFreqsMHz.first, 0)
+            return (freqs.first, 0)
+        }
+
+        let activeStates = residencies.count - offset
+        if Self.debug, !freqs.isEmpty, activeStates != freqs.count {
+            FileHandle.standardError.write(Data(
+                ("asmetrics: WARNING \(label) active-state/frequency-table "
+                    + "mismatch — \(activeStates) active states vs \(freqs.count) "
+                    + "freqs; weighted sum truncated to \(min(activeStates, freqs.count))\n").utf8))
         }
 
         let total = residencies.reduce(0, +)
@@ -187,21 +304,56 @@ public final class SoCSampler: @unchecked Sendable {
         let activeResidency = total > 0 ? activeSum / total : 0
 
         var frequencyMHz: Double?
-        if !gpuFreqsMHz.isEmpty {
+        if !freqs.isEmpty {
             if activeSum > 0 {
                 var weighted = 0.0
-                let n = min(gpuFreqsMHz.count, residencies.count - offset)
+                let n = min(freqs.count, activeStates)
                 for i in 0..<n {
-                    weighted += (residencies[i + offset] / activeSum) * gpuFreqsMHz[i]
+                    weighted += (residencies[i + offset] / activeSum) * freqs[i]
                 }
                 frequencyMHz = weighted
             } else {
                 // Idle: report the lowest active P-state frequency.
-                frequencyMHz = gpuFreqsMHz.first
+                frequencyMHz = freqs.first
             }
         }
 
         return (frequencyMHz, activeResidency)
+    }
+
+    // MARK: - Energy unit conversion
+
+    /// Convert one "Energy Model" counter's raw integer, per its unit label, to
+    /// joules. Labels vary by chip (mJ / µJ / nJ). Unknown labels assume mJ,
+    /// the most common case, rather than dropping the reading.
+    static func energyUnitToJoules(_ unit: String) -> Double {
+        switch unit.lowercased() {
+        case "mj": return 1e-3
+        case "uj", "µj": return 1e-6
+        case "nj": return 1e-9
+        case "j": return 1
+        default: return 1e-3
+        }
+    }
+
+    /// The first `candidates` name present in `energy` (exact match), or nil.
+    /// Used to pick an aggregate component counter without summing its
+    /// per-core / per-rail sub-components.
+    private static func aggregate(_ energy: [String: Double], _ candidates: [String]) -> Double? {
+        for c in candidates { if let v = energy[c] { return v } }
+        return nil
+    }
+
+    /// Number of *active* (non-idle) performance states a residency channel
+    /// reports — its total state count minus the leading idle states. Used to
+    /// match a CPU cluster channel to its DVFS table.
+    private func activeStateCount(_ channel: CFDictionary) -> Int {
+        let count = Int(IOReportStateGetCount(channel))
+        for i in 0..<count {
+            let name = (IOReportStateGetNameForIndex(channel, Int32(i)) as String?) ?? ""
+            if !Self.inactiveStateNames.contains(name) { return count - i }
+        }
+        return 0
     }
 
     // MARK: - DVFS frequency table (IORegistry "voltage-states")
@@ -231,6 +383,52 @@ public final class SoCSampler: @unchecked Sendable {
             }
         }
         return nil
+    }
+
+    /// Load the CPU clusters' DVFS frequency tables (MHz), keyed by table
+    /// length (= a cluster's active-state count). The set of CPU cluster tables
+    /// is discovered from the `acc-clusters` blob (portable across SoCs: M1–M4
+    /// clusters are `voltage-states1/5`, but M5 renumbers them), and each
+    /// cluster's frequencies live in the `-sram` variant of its `voltage-statesN`
+    /// key. Returns an empty map when nothing usable is found.
+    private static func loadCPUFrequencyTablesMHz() -> [Int: [Double]] {
+        // M5+ enumerates its clusters in `acc-clusters` (8-byte records; byte 0
+        // is the cluster's voltage-states index). M1–M4 have no such blob and
+        // use the fixed layout ECPU=voltage-states1 / PCPU=voltage-states5.
+        var indices: [Int] = []
+        if let acc = searchRegistryData(key: "acc-clusters") {
+            acc.withUnsafeBytes { raw in
+                for i in stride(from: 0, to: raw.count - 7, by: 8) {
+                    indices.append(Int(raw[i]))
+                }
+            }
+        }
+        if indices.isEmpty { indices = [1, 5] }
+
+        var tables: [Int: [Double]] = [:]
+        for idx in indices {
+            let key = "voltage-states\(idx)-sram"
+            guard let data = searchRegistryData(key: key),
+                let raw = parseVoltageStates(data) else { continue }
+            let mhz = raw.map(normalizeToMHz).drop(while: { $0 <= 0 })
+            let active = Array(mhz)
+            guard active.count > 0, active.contains(where: { $0 > 0 }) else { continue }
+            tables[active.count] = active
+            if debug {
+                FileHandle.standardError.write(Data(
+                    "asmetrics: cpu freqs from \(key): \(active)\n".utf8))
+            }
+        }
+        return tables
+    }
+
+    /// Normalize a raw DVFS frequency field to MHz by magnitude, so we don't
+    /// need a per-chip unit table: values in Hz (≥1e8) ÷1e6, in kHz (≥1e5)
+    /// ÷1e3 (M4/M5 store kHz), otherwise already MHz.
+    private static func normalizeToMHz(_ v: Double) -> Double {
+        if v >= 1e8 { return v / 1e6 }
+        if v >= 1e5 { return v / 1e3 }
+        return v
     }
 
     /// Recursively search the IORegistry (from the root, IOService plane) for

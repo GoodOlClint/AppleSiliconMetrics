@@ -19,7 +19,14 @@ let interval: TimeInterval = {
 func render(_ s: SoCSample) -> String {
     let mhz = s.gpuFrequencyMHz.map { String(format: "%.0f", $0) } ?? "n/a"
     let act = s.gpuActiveResidency.map { String(format: "%.0f%%", $0 * 100) } ?? "n/a"
-    return "gpu_mhz=\(mhz)  gpu_active=\(act)"
+    let cpu = s.cpuClusterFrequenciesMHz.map { clusters in
+        clusters.sorted { $0.key < $1.key }
+            .map { "\($0.key)=\(String(format: "%.0f", $0.value))" }
+            .joined(separator: ",")
+    } ?? "n/a"
+    let ane = s.anePowerWatts.map { String(format: "%.2fW", $0) } ?? "n/a"
+    let pkg = s.packagePowerWatts.map { String(format: "%.2fW", $0) } ?? "n/a"
+    return "gpu_mhz=\(mhz)  gpu_active=\(act)  cpu_mhz=[\(cpu)]  ane=\(ane)  pkg=\(pkg)"
 }
 
 do {
