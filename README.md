@@ -3,16 +3,16 @@
 [![CI](https://github.com/GoodOlClint/AppleSiliconMetrics/actions/workflows/ci.yml/badge.svg)](https://github.com/GoodOlClint/AppleSiliconMetrics/actions/workflows/ci.yml)
 
 Sudoless Apple Silicon SoC telemetry for Swift — GPU/CPU/ANE **frequency**,
-**active residency**, and **power**, read directly from the private `IOReport`
-framework (the same source `powermetrics` uses), with no root and no
-subprocess. Per-component **temperature** is a later, opt-in addition.
+**active residency**, **power**, and per-component **die temperature**, read
+directly from the private `IOReport` framework (the same source `powermetrics`
+uses) and the `AppleSMC` sensors, with no root and no subprocess.
 
-> **Status: working (v0.2, unreleased).** GPU effective frequency + active
-> residency, per-CPU-cluster frequencies, and ANE + whole-package power are all
-> implemented sudoless via IOReport and validated against `powermetrics` on
-> Apple Silicon idle and loaded (GPU frequency exact and package power within
-> ~1% on both M5 Max and M4 Max, macOS 26). Per-component temperature is still
-> to come — see [`PROMPT.md`](PROMPT.md).
+> **Status: working (v0.3).** GPU effective frequency + active residency,
+> per-CPU-cluster frequencies, ANE + whole-package power (all via IOReport), and
+> GPU/CPU **die temperature** (via SMC) are implemented sudoless and validated on
+> Apple Silicon idle and loaded — GPU frequency exact, package power within ~1%,
+> and GPU die temperature tracking a Metal burn (M5 Max ≈44→72 °C, M4 Max
+> ≈35→54 °C) on both M5 Max and M4 Max, macOS 26.
 
 ## Why this exists
 
@@ -28,7 +28,7 @@ the `IOReport` approach into a small, MIT-licensed, reusable SwiftPM library.
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/GoodOlClint/AppleSiliconMetrics.git", from: "0.1.0")
+    .package(url: "https://github.com/GoodOlClint/AppleSiliconMetrics.git", from: "0.3.0")
 ]
 ```
 
@@ -42,6 +42,7 @@ import AppleSiliconMetrics
 let sampler = try SoCSampler()
 let s = sampler.sample(interval: 0.2)
 print(s.gpuFrequencyMHz ?? -1)   // effective GPU MHz over the window
+print(s.gpuTemperatureC ?? -1)   // GPU die temperature in °C (nil if unavailable)
 ```
 
 Or the bundled CLI, for validation against `powermetrics`:
@@ -52,8 +53,10 @@ swift run asmetrics --watch
 sudo powermetrics --samplers gpu_power | grep "GPU HW active frequency"
 ```
 
-Set `ASMETRICS_DEBUG=1` to dump the discovered IOReport channels and the loaded
-DVFS frequency table to stderr — handy when porting to a new SoC or OS.
+Set `ASMETRICS_DEBUG=1` to dump the discovered IOReport channels, the loaded
+DVFS frequency table, the discovered SMC temperature sensors, and every
+thermal-looking IOReport channel across all groups — handy when porting to a
+new SoC or OS.
 
 ### Running the tests
 
@@ -69,19 +72,27 @@ The library and `asmetrics` CLI build fine under Command Line Tools alone.
 
 ## Scope
 
-- **v1:** GPU effective frequency (MHz) + active residency, sudoless via
+- **v0.1:** GPU effective frequency (MHz) + active residency, sudoless via
   IOReport. The stable, generation-portable core.
-- **Later:** CPU cluster frequencies, ANE/package power, per-component temps.
-  Temperature is the *fragile* part — Apple changes SMC sensor keys every SoC
-  generation (M5, for example, exposes GPU temp via new `flt`-typed `Tg0*`
-  keys) — so it ships behind its own type with per-SoC key tables.
+- **v0.2:** CPU cluster frequencies + ANE/whole-package power (IOReport).
+- **v0.3:** GPU/CPU **die temperature** in °C, via SMC. IOReport turned out not
+  to expose usable temperature (M5 has no GPU-temp channels; M4's read back 0),
+  so temperature is read from the `AppleSMC` `flt` sensors — discovered by
+  prefix (`Tg`/`Tp`/`Te`) rather than a per-SoC key table that rots. See
+  [ADR 0001](docs/decisions/0001-die-temperature-from-smc-not-ioreport.md).
 
 ## Caveats
 
-`IOReport` is a **private framework**: undocumented and version-fragile. Every
-metric is optional and returns `nil` when unreadable, so consumers degrade
-gracefully. No private symbols are copied from GPL sources; the implementation
-is an independent port of the documented-by-reverse-engineering call sequence.
+`IOReport` and the `AppleSMC` sensor layout are **private, undocumented, and
+version-fragile**. Every metric is optional and returns `nil` when unreadable,
+so consumers degrade gracefully. No private symbols are copied from GPL sources;
+the implementation is an independent port of the documented-by-reverse-engineering
+call sequence.
+
+**Tested only on macOS 26** (Tahoe), on M4 Max and M5 Max. It builds for macOS
+13+ and is written to degrade to `nil` on other OS versions and chips, but the
+channel names, DVFS-table encodings, and SMC sensor keys have not been verified
+against any other macOS release — treat earlier/later versions as unvalidated.
 
 ## License
 

@@ -26,7 +26,10 @@ func render(_ s: SoCSample) -> String {
     } ?? "n/a"
     let ane = s.anePowerWatts.map { String(format: "%.2fW", $0) } ?? "n/a"
     let pkg = s.packagePowerWatts.map { String(format: "%.2fW", $0) } ?? "n/a"
+    let gtemp = s.gpuTemperatureC.map { String(format: "%.1fC", $0) } ?? "n/a"
+    let ctemp = s.cpuTemperatureC.map { String(format: "%.1fC", $0) } ?? "n/a"
     return "gpu_mhz=\(mhz)  gpu_active=\(act)  cpu_mhz=[\(cpu)]  ane=\(ane)  pkg=\(pkg)"
+        + "  gpu_temp=\(gtemp)  cpu_temp=\(ctemp)"
 }
 
 do {

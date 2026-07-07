@@ -88,6 +88,24 @@ private let isAppleSilicon: Bool = {
     }
 }
 
+/// Die temperatures, when reported, land in a physically sane band. Read from
+/// SMC (`Tg…` for GPU, `Tp…`/`Te…` for CPU), so `nil` where those sensors are
+/// absent/unreadable — but never NaN or an implausible value. Validated to
+/// track load on M5 Max (≈44 °C idle → ≈72 °C under a Metal burn) and M4 Max.
+@Test func temperaturesAreSaneOnAppleSilicon() throws {
+    try #require(isAppleSilicon, "requires Apple Silicon")
+
+    let sampler = try SoCSampler()
+    let sample = sampler.sample(interval: 0.05)
+
+    for (label, temp) in [("gpu", sample.gpuTemperatureC), ("cpu", sample.cpuTemperatureC)] {
+        guard let temp else { continue }  // optional: nil where SMC sensors absent
+        #expect(!temp.isNaN, "\(label) temperature is NaN")
+        #expect(temp > 0, "\(label) temperature implausibly low: \(temp)")
+        #expect(temp < 130, "\(label) temperature implausibly high: \(temp)")
+    }
+}
+
 /// The energy-unit conversion maps each chip's label to joules correctly —
 /// the mJ/µJ/nJ variance the "Energy Model" counters exhibit across SoCs.
 @Test func energyUnitConversion() {

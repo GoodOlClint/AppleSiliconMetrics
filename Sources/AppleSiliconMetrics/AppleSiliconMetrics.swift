@@ -40,20 +40,33 @@ public struct SoCSample: Sendable, Equatable {
     /// energy channels could be read.
     public var packagePowerWatts: Double?
 
-    // TODO (PROMPT.md): per-component temperatures — see v0.3 plan.
+    /// GPU die temperature in °C — the mean of the SMC `Tg…` sensors (the same
+    /// per-cluster GPU sensors `mactop` averages). `nil` when the SMC sensors
+    /// are unreadable (or absent on this chip). Read from SMC rather than
+    /// IOReport: M5 exposes no IOReport GPU-temperature channels, and M4's read
+    /// back 0 through the documented accessor.
+    public var gpuTemperatureC: Double?
+
+    /// CPU die temperature in °C — the mean of the SMC `Tp…`/`Te…` (P-/E-core)
+    /// sensors. `nil` when unreadable/absent.
+    public var cpuTemperatureC: Double?
 
     public init(
         gpuFrequencyMHz: Double? = nil,
         gpuActiveResidency: Double? = nil,
         cpuClusterFrequenciesMHz: [String: Double]? = nil,
         anePowerWatts: Double? = nil,
-        packagePowerWatts: Double? = nil
+        packagePowerWatts: Double? = nil,
+        gpuTemperatureC: Double? = nil,
+        cpuTemperatureC: Double? = nil
     ) {
         self.gpuFrequencyMHz = gpuFrequencyMHz
         self.gpuActiveResidency = gpuActiveResidency
         self.cpuClusterFrequenciesMHz = cpuClusterFrequenciesMHz
         self.anePowerWatts = anePowerWatts
         self.packagePowerWatts = packagePowerWatts
+        self.gpuTemperatureC = gpuTemperatureC
+        self.cpuTemperatureC = cpuTemperatureC
     }
 }
 
@@ -108,6 +121,11 @@ public final class SoCSampler: @unchecked Sendable {
     /// if a future SoC pairs same-count clusters with different tables.
     private let cpuFreqTablesByCount: [Int: [Double]]
 
+    /// SMC die-temperature reader (GPU/CPU). Best-effort: `nil` when AppleSMC
+    /// exposes no readable `flt` temperature sensors, leaving the temperature
+    /// fields `nil` per the graceful-degradation contract.
+    private let smc: SMCReader?
+
     public init() throws {
         // Subscribe to GPU + CPU perf-state residency and the Energy Model
         // power counters in one subscription. GPU Stats is required (it is the
@@ -138,12 +156,38 @@ public final class SoCSampler: @unchecked Sendable {
         // active-residency, just not an effective-MHz figure.
         self.gpuFreqsMHz = Self.loadGPUFrequencyTableMHz() ?? []
         self.cpuFreqTablesByCount = Self.loadCPUFrequencyTablesMHz()
+        // Temperatures come from SMC (see SMCReader). Enumerates its sensors
+        // once here; sample() only re-reads their values.
+        self.smc = SMCReader()
 
         if Self.debug {
             FileHandle.standardError.write(Data(
                 ("asmetrics: gpu DVFS table (MHz): \(gpuFreqsMHz)\n"
                     + "asmetrics: cpu DVFS tables by active-count (MHz): "
                     + "\(cpuFreqTablesByCount)\n").utf8))
+            Self.dumpThermalChannels()
+        }
+    }
+
+    /// Debug aid for porting temperature to a new SoC/OS: dump every IOReport
+    /// channel (across *all* groups, not just the ones we subscribe to) whose
+    /// group/subgroup/name looks thermal. This is how the M4-vs-M5 difference
+    /// was found — the GPU-temperature channels live outside "GPU Stats" (or,
+    /// on M5, do not exist at all, which is why temperatures come from SMC).
+    private static func dumpThermalChannels() {
+        guard let all = IOReportCopyAllChannels(0, 0),
+            let entries = (all as NSDictionary)["IOReportChannels"] as? NSArray
+        else { return }
+        for case let entry as NSDictionary in entries {
+            let channel = unsafeBitCast(entry, to: CFDictionary.self)
+            let group = (IOReportChannelGetGroup(channel) as String?) ?? "-"
+            let sub = (IOReportChannelGetSubGroup(channel) as String?) ?? "-"
+            let name = (IOReportChannelGetChannelName(channel) as String?) ?? "-"
+            let hay = "\(group) \(sub) \(name)".lowercased()
+            guard hay.contains("temp") || name.hasPrefix("Tg") || name.hasPrefix("Tp")
+            else { continue }
+            FileHandle.standardError.write(Data(
+                "asmetrics: thermal channel group=\(group) subgroup=\(sub) name=\(name)\n".utf8))
         }
     }
 
@@ -254,6 +298,13 @@ public final class SoCSampler: @unchecked Sendable {
             // Power (CPU + GPU + ANE)". Sum whichever components were found.
             let parts = [cpu, gpu, ane].compactMap { $0 }
             if !parts.isEmpty { out.packagePowerWatts = parts.reduce(0, +) / window }
+        }
+
+        // Die temperatures are instantaneous SMC gauges (no window needed).
+        if let smc {
+            let t = smc.readTemperatures()
+            out.gpuTemperatureC = t.gpu
+            out.cpuTemperatureC = t.cpu
         }
 
         return out
