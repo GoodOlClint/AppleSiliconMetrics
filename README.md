@@ -1,5 +1,7 @@
 # AppleSiliconMetrics
 
+[![CI](https://github.com/GoodOlClint/AppleSiliconMetrics/actions/workflows/ci.yml/badge.svg)](https://github.com/GoodOlClint/AppleSiliconMetrics/actions/workflows/ci.yml)
+
 Sudoless Apple Silicon SoC telemetry for Swift — GPU/CPU/ANE **frequency**,
 **active residency**, and **power**, read directly from the private `IOReport`
 framework (the same source `powermetrics` uses), with no root and no
@@ -7,7 +9,8 @@ subprocess. Per-component **temperature** is a later, opt-in addition.
 
 > **Status: working (v0.1.0).** GPU effective frequency + active residency are
 > implemented sudoless via IOReport and validated against `powermetrics` on
-> Apple Silicon (exact match idle and loaded on M5 Max). CPU/ANE/package power
+> Apple Silicon (exact match idle and loaded on M5 Max and M4 Max, macOS 26).
+> CPU/ANE/package power
 > and temperature are still to come — see [`PROMPT.md`](PROMPT.md).
 
 ## Why this exists
@@ -18,6 +21,17 @@ all in other languages — [macmon](https://github.com/vladkens/macmon) and
 (Go), [agtop](https://github.com/binlecode/agtop) (Python). The Swift options
 are full apps (e.g. `exelban/Stats`, which is also GPL-3.0). This package ports
 the `IOReport` approach into a small, MIT-licensed, reusable SwiftPM library.
+
+## Installation
+
+```swift
+// Package.swift
+dependencies: [
+    .package(url: "https://github.com/GoodOlClint/AppleSiliconMetrics.git", from: "0.1.0")
+]
+```
+
+Requires macOS 13+ and Apple Silicon (constructs but degrades to `nil` elsewhere).
 
 ## Usage (target API)
 

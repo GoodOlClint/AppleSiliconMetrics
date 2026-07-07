@@ -63,7 +63,8 @@ public final class SoCSampler: @unchecked Sendable {
     private let subscribedChannels: CFMutableDictionary
 
     /// GPU DVFS frequencies in MHz, one per *active* performance state, in
-    /// ascending order. Empty when the voltage-states table could not be read.
+    /// P-state index order (NOT necessarily ascending — M4 Max interleaves,
+    /// e.g. …1312, 1242, 1380…). Empty when the table could not be read.
     private let gpuFreqsMHz: [Double]
 
     public init() throws {

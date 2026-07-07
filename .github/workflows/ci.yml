@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-15 # arm64 Apple Silicon runner
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build
+      # Hosted runners are VMs where the IOReport GPU channels may be absent,
+      # so only the portable never-trap contract runs here. The hardware-strict
+      # tests (sane-MHz range vs powermetrics) are for real Apple Silicon.
+      - name: Test (portable contract)
+        run: swift test --filter samplerConstructsAndSamples
